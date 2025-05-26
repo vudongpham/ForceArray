@@ -4,6 +4,6 @@ setup(
     name='forcearray',
     version='1.0',
     packages=find_packages(),
-    install_requires=[],
+    install_requires=['rasterio'],
     python_requires='>=3.6',
 )
