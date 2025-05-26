@@ -60,7 +60,7 @@ class forcearray():
             x_mask = boa_stack[mask]
             x_mask = np.ma.masked_equal(x_mask, nodata)
             x_mask = np.ma.mean(x_mask, axis=0)
-            x_mask.filled(nodata)
+            x_mask = x_mask.filled(nodata)
             te[i, ...] = x_mask
         
         del boa_stack
