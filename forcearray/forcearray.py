@@ -39,7 +39,7 @@ class forcearray():
         self.cso_list = self.__get_cso_value()
     
 
-    def get_data(self, time_step, nodata=-9999):
+    def get_data(self, time_step, nodata=-9999, toInt16=False):
         data_dates = np.array([x[:8] for x in self.qai_files])
         data_dates = np.array([datetime.strptime(date_str, "%Y%m%d") for date_str in data_dates], dtype=np.datetime64)
         
@@ -64,9 +64,8 @@ class forcearray():
             te[i, ...] = x_mask
         
         del boa_stack
-
-        te = te.astype(np.int16)
-        
+        if toInt16:
+            te = te.astype(np.int16)
         return te
         
 
