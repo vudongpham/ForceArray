@@ -64,6 +64,9 @@ class forcearray():
             te[i, ...] = x_mask
         
         del boa_stack
+
+        te = te.astype(np.int16)
+        
         return te
         
 
