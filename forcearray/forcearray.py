@@ -47,6 +47,7 @@ class forcearray():
         boa_stack = np.array([self.__read_image(boa) for boa in self.boa_files])
         nodata_mask = ~np.isin(qai_stack, self.cso_list)
         boa_stack[nodata_mask, :] = nodata
+
         del qai_stack
 
         target_dates = self.__generate_date_list(time_step)
@@ -82,13 +83,14 @@ class forcearray():
         date_list = np.array([datetime.strptime(date_str, "%Y%m%d") for date_str in date_list], dtype=np.datetime64)
         return date_list
     
-    def __read_image(self, image_name, band_last=True):
+    def __read_image(self, image_name, nodata=-9999):
         with rasterio.open(os.path.join(self.tile_dir, image_name)) as src:
             band_count = src.count
             arr = src.read()
         if band_count > 1:
-            if band_last:
-                arr = np.moveaxis(arr, 0, -1)
+            arr = np.moveaxis(arr, 0, -1)
+            invalid_mask = np.logical_or(np.any(arr < 0, axis=-1), np.any(arr > 10000, axis=-1))
+            arr[invalid_mask, :] = nodata
         else:
             arr = arr[0]
         return arr   
