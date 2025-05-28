@@ -83,7 +83,7 @@ class forcearray():
         for i in range(band_count):
             boa_chunk = boa_stack[..., i]
             boa_chunk = boa_chunk.astype(np.float32)
-            boa_chunk = boa_stack.filled(np.nan)
+            boa_chunk = boa_chunk.filled(np.nan)
             stm_chunk = np.nanpercentile(boa_chunk, q=percentile_list, axis=0, keepdims=True)
             stm_chunk = np.where(np.isnan(stm), nodata, stm_chunk)
             stm.append(stm_chunk)   
