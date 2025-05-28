@@ -39,7 +39,7 @@ class forcearray():
         self.cso_list = self.__get_cso_value()
     
 
-    def get_data(self, time_step, nodata=-9999, toInt16=False):
+    def get_data_te(self, time_step, nodata=-9999, toInt16=False):
         data_dates = np.array([x[:8] for x in self.qai_files])
         data_dates = np.array([datetime.strptime(date_str, "%Y%m%d") for date_str in data_dates], dtype=np.datetime64)
         
@@ -68,7 +68,26 @@ class forcearray():
         if toInt16:
             te = te.astype(np.int16)
         return te
+    
+    def get_data_stm(self, percentile_list, nodata=-9999, toInt16=False):
+        boa_stack = np.array([self.__read_image(boa) for boa in self.boa_files])
+        qai_stack = np.array([self.__read_image(qai) for qai in self.qai_files])
+        nodata_mask = ~np.isin(qai_stack, self.cso_list)
+        boa_stack[nodata_mask, :] = nodata
+        boa_stack = np.ma.masked_equal(boa_stack, nodata)
+
+        stm  = np.ma.percentile(
+            boa_stack,
+            q=percentile_list,
+            axis=0
+        )
+
+        del boa_stack
+        if toInt16:
+            stm = stm.astype(np.int16)
+        return stm
         
+
 
     def __generate_date_list(self, time_step):
         start = datetime.strptime(self.start_date, "%Y%m%d")
