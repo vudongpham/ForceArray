@@ -69,18 +69,18 @@ class forcearray():
             te = te.astype(np.int16)
         return te
     
-    def get_data_median(self, nodata=-9999, toInt16=False):
+    def get_data_mean(self, nodata=-9999, toInt16=False):
         boa_stack = np.array([self.__read_image(boa) for boa in self.boa_files])
         qai_stack = np.array([self.__read_image(qai) for qai in self.qai_files])
         nodata_mask = ~np.isin(qai_stack, self.cso_list)
         boa_stack[nodata_mask, :] = nodata
         boa_stack = np.ma.masked_equal(boa_stack, nodata)
-        median_stack = np.ma.median(boa_stack, axis=0)
-        median_stack = median_stack.filled(nodata)
+        mean_stack = np.ma.mean(boa_stack, axis=0)
+        mean_stack = mean_stack.filled(nodata)
         del boa_stack
         if toInt16:
-            median_stack = median_stack.astype(np.int16)
-        return median_stack
+            mean_stack = mean_stack.astype(np.int16)
+        return mean_stack
         
 
 
