@@ -72,11 +72,13 @@ class forcearray():
     def get_data_stm(self, percentile_list, nodata=-9999, toInt16=False):
         boa_stack = np.array([self.__read_image(boa) for boa in self.boa_files])
         qai_stack = np.array([self.__read_image(qai) for qai in self.qai_files])
+
         nodata_mask = ~np.isin(qai_stack, self.cso_list)
         boa_stack[nodata_mask, :] = nodata
         boa_stack = np.ma.masked_equal(boa_stack, nodata)
+        boa_stack = boa_stack.astype(np.float32)
         boa_stack = boa_stack.filled(np.nan)
-
+        
         stm  = np.nanpercentile(boa_stack, q=percentile_list, axis=0)
         stm = np.where(np.isnan(stm), nodata, stm)
         
