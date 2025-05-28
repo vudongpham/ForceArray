@@ -75,13 +75,11 @@ class forcearray():
         nodata_mask = ~np.isin(qai_stack, self.cso_list)
         boa_stack[nodata_mask, :] = nodata
         boa_stack = np.ma.masked_equal(boa_stack, nodata)
+        boa_stack = boa_stack.filled(np.nan)
 
-        stm  = np.ma.percentile(
-            boa_stack,
-            q=percentile_list,
-            axis=0
-        )
-
+        stm  = np.nanpercentile(boa_stack, q=percentile_list, axis=0)
+        stm = np.where(np.isnan(stm), nodata, stm)
+        
         del boa_stack
         if toInt16:
             stm = stm.astype(np.int16)
