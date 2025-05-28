@@ -76,11 +76,19 @@ class forcearray():
         nodata_mask = ~np.isin(qai_stack, self.cso_list)
         boa_stack[nodata_mask, :] = nodata
         boa_stack = np.ma.masked_equal(boa_stack, nodata)
-        boa_stack = boa_stack.astype(np.float32)
-        boa_stack = boa_stack.filled(np.nan)
-        
-        stm  = np.nanpercentile(boa_stack, q=percentile_list, axis=0)
-        stm = np.where(np.isnan(stm), nodata, stm)
+
+        band_count = boa_stack.shape[-1]
+
+        stm = []
+        for i in range(band_count):
+            boa_chunk = boa_stack[..., i]
+            boa_chunk = boa_chunk.astype(np.float32)
+            boa_chunk = boa_stack.filled(np.nan)
+            stm_chunk = np.nanpercentile(boa_chunk, q=percentile_list, axis=0, keepdims=True)
+            stm_chunk = np.where(np.isnan(stm), nodata, stm_chunk)
+            stm.append(stm_chunk)   
+
+        stm = np.concatenate(stm, axis=-1)
         
         del boa_stack
         if toInt16:
