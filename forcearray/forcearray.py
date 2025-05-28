@@ -69,31 +69,18 @@ class forcearray():
             te = te.astype(np.int16)
         return te
     
-    def get_data_stm(self, percentile_list, nodata=-9999, toInt16=False):
+    def get_data_median(self, nodata=-9999, toInt16=False):
         boa_stack = np.array([self.__read_image(boa) for boa in self.boa_files])
         qai_stack = np.array([self.__read_image(qai) for qai in self.qai_files])
-
         nodata_mask = ~np.isin(qai_stack, self.cso_list)
         boa_stack[nodata_mask, :] = nodata
         boa_stack = np.ma.masked_equal(boa_stack, nodata)
-
-        band_count = boa_stack.shape[-1]
-
-        stm = []
-        for i in range(band_count):
-            boa_chunk = boa_stack[..., i]
-            boa_chunk = boa_chunk.astype(np.float32)
-            boa_chunk = boa_chunk.filled(np.nan)
-            stm_chunk = np.nanpercentile(boa_chunk, q=percentile_list, axis=0, keepdims=True)
-            stm_chunk = np.where(np.isnan(stm), nodata, stm_chunk)
-            stm.append(stm_chunk)   
-
-        stm = np.concatenate(stm, axis=-1)
-        
+        median_stack = np.ma.median(boa_stack, axis=0)
+        median_stack = median_stack.filled(nodata)
         del boa_stack
         if toInt16:
-            stm = stm.astype(np.int16)
-        return stm
+            median_stack = median_stack.astype(np.int16)
+        return median_stack
         
 
 
