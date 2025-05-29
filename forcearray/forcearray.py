@@ -3,6 +3,7 @@ from itertools import product
 import os
 import rasterio
 import numpy as np
+import fastnanquantile as fnq
 
 
 def toRaster(arr_in, base_raster, out_raster):
@@ -77,7 +78,7 @@ class forcearray():
         boa_stack[nodata_mask, :] = nodata
         boa_stack = boa_stack.astype(np.float32)
         boa_stack = np.where(boa_stack == nodata, np.nan, boa_stack)
-        stm = np.nanpercentile(boa_stack, q=p_list, axis=0)
+        stm = fnq.nanquantile(boa_stack, q=p_list, axis=0)
         stm = np.nan_to_num(stm, copy=False, nan=nodata)
         del boa_stack
         if toInt16:
