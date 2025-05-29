@@ -71,7 +71,7 @@ class forcearray():
             te = te.astype(np.int16)
         return te
     
-    def get_data_stm(self, p_list, nodata=-9999, chunksize=10, toInt16=False):
+    def get_data_stm(self, p_list, nodata=-9999, toInt16=False):
         boa_stack = np.array([self.__read_image(boa) for boa in self.boa_files])
         qai_stack = np.array([self.__read_image(qai) for qai in self.qai_files])
         nodata_mask = ~np.isin(qai_stack, self.cso_list)
