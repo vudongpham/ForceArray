@@ -3,6 +3,7 @@ from itertools import product
 import os
 import rasterio
 import numpy as np
+import dask.array as da
 
 def toRaster(arr_in, base_raster, out_raster):
     with rasterio.open(base_raster) as src:
@@ -68,6 +69,20 @@ class forcearray():
         if toInt16:
             te = te.astype(np.int16)
         return te
+    
+    def get_data_stm(self, p_list, nodata=-9999, chunksize=10, toInt16=False):
+        boa_stack = np.array([self.__read_image(boa) for boa in self.boa_files])
+        qai_stack = np.array([self.__read_image(qai) for qai in self.qai_files])
+        nodata_mask = ~np.isin(qai_stack, self.cso_list)
+        boa_stack[nodata_mask, :] = nodata
+        boa_stack = da.from_array(boa_stack, chunks=(chunksize, boa_stack.shape[1], boa_stack.shape[2], boa_stack.shape[3]))
+        boa_stack = boa_stack.astype(np.float32)
+        boa_stack = da.where(boa_stack == nodata, np.nan, boa_stack)
+        stm = da.nanpercentile(boa_stack, q=p_list, axis=0).compute()
+        del boa_stack
+        if toInt16:
+            stm = stm.astype(np.int16)
+        return stm
     
     def get_data_mean(self, nodata=-9999, toInt16=False):
         boa_stack = np.array([self.__read_image(boa) for boa in self.boa_files])
