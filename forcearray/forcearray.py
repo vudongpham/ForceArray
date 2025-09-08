@@ -41,7 +41,7 @@ class forcearray():
         self.cso_list = self.__get_cso_value()
     
 
-    def get_data_te(self, time_step, nodata=-9999, toInt16=False):
+    def get_data_te(self, time_step, nodata=-9999, toInt16=False, trackProgress=False):
         data_dates = np.array([x[:8] for x in self.qai_files])
         data_dates = np.array([datetime.strptime(date_str, "%Y%m%d") for date_str in data_dates], dtype=np.datetime64)
         
@@ -56,6 +56,8 @@ class forcearray():
         
         te = np.full(shape=(len(target_dates) - 1, boa_stack.shape[1], boa_stack.shape[2], boa_stack.shape[3]), fill_value=nodata)
         
+        progress = len(target_dates)
+        c = 0
         for i in range(len(target_dates) - 1):
             mask = np.logical_and(data_dates >= target_dates[i], data_dates < target_dates[i + 1])
             if not np.any(mask):
@@ -65,6 +67,9 @@ class forcearray():
             x_mask = np.ma.mean(x_mask, axis=0)
             x_mask = x_mask.filled(nodata)
             te[i, ...] = x_mask
+            c += 1
+            if trackProgress:
+                print(f'\rEncoding {c}/{progress}', end='', flush=True)
         
         del boa_stack
         if toInt16:
