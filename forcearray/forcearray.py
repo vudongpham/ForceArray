@@ -108,14 +108,33 @@ class forcearray():
     def __generate_date_list(self, time_step):
         start = datetime.strptime(self.start_date, "%Y%m%d")
         end = datetime.strptime(self.end_date, "%Y%m%d")
-        delta = timedelta(days=time_step)
-
+        
         date_list = []
-        current = start
-        while current <= end:
-            date_list.append(current.strftime("%Y%m%d"))
-            current += delta
-        date_list = np.array([datetime.strptime(date_str, "%Y%m%d") for date_str in date_list], dtype=np.datetime64)
+        d = start
+        noleap_days = 0
+    
+        # Add start if it's not Feb 29
+        if not (d.month == 2 and d.day == 29):
+            date_list.append(d.strftime("%Y%m%d"))
+    
+        d += timedelta(days=1)
+        while d <= end:
+            # Skip Feb 29 completely
+            if d.month == 2 and d.day == 29:
+                d += timedelta(days=1)
+                continue
+    
+            noleap_days += 1
+            if noleap_days % time_step == 0:
+                date_list.append(d.strftime("%Y%m%d"))
+    
+            d += timedelta(days=1)
+    
+        # Return in your preferred format
+        date_list = np.array(
+            [datetime.strptime(date_str, "%Y%m%d") for date_str in date_list],
+            dtype=np.datetime64
+        )
         return date_list
     
     def __read_image(self, image_name, nodata=-9999):
