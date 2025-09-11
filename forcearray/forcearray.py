@@ -61,6 +61,7 @@ class forcearray():
         for i in range(len(target_dates) - 1):
             mask = np.logical_and(data_dates >= target_dates[i], data_dates < target_dates[i + 1])
             if not np.any(mask):
+                c += 1
                 continue
             x_mask = boa_stack[mask]
             x_mask = np.ma.masked_equal(x_mask, nodata)
