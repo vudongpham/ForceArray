@@ -108,11 +108,10 @@ class forcearray():
     def __generate_date_list(self, time_step):
         start = datetime.strptime(self.start_date, "%Y%m%d")
         end = datetime.strptime(self.end_date, "%Y%m%d")
-        
         date_list = []
         d = start
         noleap_days = 0
-    
+        
         # Add start if it's not Feb 29
         if not (d.month == 2 and d.day == 29):
             date_list.append(d.strftime("%Y%m%d"))
@@ -127,10 +126,8 @@ class forcearray():
             noleap_days += 1
             if noleap_days % time_step == 0:
                 date_list.append(d.strftime("%Y%m%d"))
-    
             d += timedelta(days=1)
     
-        # Return in your preferred format
         date_list = np.array(
             [datetime.strptime(date_str, "%Y%m%d") for date_str in date_list],
             dtype=np.datetime64
