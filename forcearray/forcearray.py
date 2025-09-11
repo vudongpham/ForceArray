@@ -72,7 +72,7 @@ class forcearray():
             if trackProgress:
                 print(f'\rEncoding {c}/{progress}', end='', flush=True)
         
-        del boa_stack
+        del boa_stack 
         if toInt16:
             te = te.astype(np.int16)
         return te
