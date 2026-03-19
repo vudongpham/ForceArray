@@ -27,20 +27,50 @@ def toRaster(arr_in, base_raster, out_raster):
             dst.write(arr_in[i], i + 1)
 
 class forcearray():
-    def __init__(self, level2_dir, tile, start_date, end_date, sensors, best_cso=False):
+    def __init__(self, level2_dir, tile, start_date, end_date, sensors, bandlist, best_cso=False):
         self.tile_dir = os.path.join(level2_dir, tile)
         self.start_date = start_date
         self.end_date = end_date
         self.sensors = sensors
         self.best_cso = best_cso
+        self.bandlist = bandlist
+        self.LS_allowed_sensors = ['LND04', 'LND05', 'LND07', 'LND08', 'LND09']
+        self.S2_allowed_sensors = ['SEN2A', 'SEN2B', 'SEN2C']
+
+        self.LS_bandlist = {
+            'BLU' : 1,
+            'GRN' : 2,
+            'RED' : 3,
+            'NIR' : 4,
+            'SW1' : 5,
+            'SW2' : 6
+        }
+
+        self.S2_bandlist = {
+            'BLU' : 1,
+            'GRN' : 2,
+            'RED' : 3,
+            'RE1' : 4,
+            'RE2' : 5,
+            'RE3' : 6,
+            'BNR' : 7,
+            'NIR' : 8,
+            'SW1' : 9,
+            'SW2' : 10
+        }
+
+        self.LS_band_index = [self.LS_bandlist[b] for b in self.bandlist]
+        self.S2_band_index = [self.S2_bandlist[b] for b in self.bandlist]
 
         # Get list boa, qai
         self.boa_files, self.qai_files = self.__get_image_list()
 
+        # Get sensor list
+        self.sensor_list = [s.split('_')[2] for s in  self.boa_files]
+
         # Get cso value
         self.cso_list = self.__get_cso_value()
     
-
     def get_data_te(self, time_step, nodata=-9999, toInt16=False, trackProgress=False):
         data_dates = np.array([x[:8] for x in self.qai_files])
         data_dates = np.array([datetime.strptime(date_str, "%Y%m%d") for date_str in data_dates], dtype=np.datetime64)
@@ -136,9 +166,20 @@ class forcearray():
         return date_list
     
     def __read_image(self, image_name, nodata=-9999):
+        sensor = image_name.split('_')[2]
+        if sensor in self.LS_allowed_sensors:
+            band_index = self.LS_band_index
+        elif sensor in self.S2_allowed_sensors:
+            band_index = self.S2_band_index
+        else:
+            raise ValueError('{sensor} does not exist in the allowed list')
+
         with rasterio.open(os.path.join(self.tile_dir, image_name)) as src:
             band_count = src.count
-            arr = src.read()
+            if band_count > 1:
+                arr = src.read(band_index)
+            else:
+                arr = src.read()
         if band_count > 1:
             arr = np.moveaxis(arr, 0, -1)
             invalid_mask = np.logical_or(np.any(arr < 0, axis=-1), np.any(arr > 10000, axis=-1))
@@ -212,7 +253,7 @@ class forcearray():
         cso_value = [int(x, 2) for x in cso_value]
         cso_value.sort()
         return cso_value
-            
+
     
 
 
