@@ -43,6 +43,8 @@ from rasterio.windows import Window
 from affine import Affine
 from numba import njit, prange
 
+from . import config
+
 
 def _amul(a, b):
     """``a @ b`` for Affine transforms (or a transform and a point).
@@ -244,27 +246,8 @@ class forcearray():
         self.LS_allowed_sensors = ['LND04', 'LND05', 'LND07', 'LND08', 'LND09']
         self.S2_allowed_sensors = ['SEN2A', 'SEN2B', 'SEN2C']
 
-        self.LS_bandlist = {
-            'BLU' : 1,
-            'GRN' : 2,
-            'RED' : 3,
-            'NIR' : 4,
-            'SW1' : 5,
-            'SW2' : 6
-        }
-
-        self.S2_bandlist = {
-            'BLU' : 1,
-            'GRN' : 2,
-            'RED' : 3,
-            'RE1' : 4,
-            'RE2' : 5,
-            'RE3' : 6,
-            'BNR' : 7,
-            'NIR' : 8,
-            'SW1' : 9,
-            'SW2' : 10
-        }
+        self.LS_bandlist = dict(config.LS_BANDLIST)
+        self.S2_bandlist = dict(config.S2_BANDLIST)
 
         # Band indices are only computed for sensor families that are
         # actually used, so S2-only bands do not fail on S2-only queries.
@@ -346,6 +329,36 @@ class forcearray():
         """Per-pixel mean of all valid observations, shape (rows, cols, bands)."""
         with rasterio.Env(**self.gdal_options):
             return self._squeeze_pixels(self._get_data_mean(nodata, toInt16))
+
+    def get_rawdata(self, nodata=-9999, drop_empty=False, trackProgress=False):
+        """Stack of every image, masked with its QAI.
+
+        Returns ``(raw_stack, date_list, sensor_list)``:
+
+        raw_stack : int16 array of shape (n_images, rows, cols, bands)
+            (``(n_images, n_pixels, bands)`` with ``pixels``). Pixels that are
+            not valid in the QAI (or outside 0..10000) are set to ``nodata``.
+        date_list : list of str
+            Acquisition date 'YYYYMMDD' of each image.
+        sensor_list : list of str
+            Sensor of each image, e.g. 'LND08' or 'SEN2A'.
+
+        Images are sorted by date. With ``drop_empty=True``, images without
+        any valid pixel (in the block / pixels read) are left out.
+
+        The whole stack is held in memory: about
+        n_images * rows * cols * bands * 2 bytes.
+        """
+        with rasterio.Env(**self.gdal_options):
+            stack, keep = self._get_rawdata(nodata, trackProgress)
+        if drop_empty:
+            stack = stack[keep]
+            idx = np.flatnonzero(keep)
+        else:
+            idx = range(len(self.boa_files))
+        date_list = [self.boa_files[i][:8] for i in idx]
+        sensor_list = [self.sensor_list[i] for i in idx]
+        return self._squeeze_pixels(stack), date_list, sensor_list
 
     # Deprecated attribute names (``points`` was renamed to ``pixels``).
     @property
@@ -453,6 +466,31 @@ class forcearray():
         if scalar_q:
             stm = stm[0]
         return stm
+
+    def _get_rawdata(self, nodata, trackProgress):
+        H, W = self.shape
+        B = len(self.bandlist)
+        T = len(self.boa_files)
+        stack = np.empty((T, H, W, B), dtype=np.int16)
+        keep = np.zeros(T, dtype=bool)
+        nodata = np.int16(nodata)
+
+        def fill(t):
+            boa, valid = self._read_masked(t)
+            if boa is None:
+                stack[t] = nodata
+                return
+            keep[t] = True
+            boa[:, ~valid] = nodata
+            stack[t] = np.moveaxis(boa, 0, -1)  # (B, H, W) -> (H, W, B)
+
+        with ThreadPoolExecutor(self.n_workers) as ex:
+            for done, _ in enumerate(ex.map(fill, range(T)), 1):
+                if trackProgress:
+                    print(f'\rReading {done}/{T}', end='', flush=True)
+        if trackProgress and T:
+            print()
+        return stack, keep
 
     def _get_data_mean(self, nodata, toInt16):
         H, W = self.shape
@@ -748,42 +786,7 @@ class forcearray():
         return boa_files, qai_files
 
     def __get_cso_value(self):
-        filtering_default = {
-            'Valid data' : ['0'],
-            'Cloud state' : ['00'],
-            'Cloud shadow flag' : ['0'],
-            'Snow flag' : ['0'],
-            'Water flag': ['0', '1'],
-            'Aerosol state' : ['00', '01', '10', '11'],
-            'Subzero flag' : ['0'],
-            'Saturation flag' : ['0'],
-            'High sun zenith flag' : ['0', '1'],
-            'Illumination state' : ['00', '01', '10', '11'],
-            'Slope flag' : ['0', '1'],
-            'Water vapor flag' : ['0', '1'],
-            'Empty' : ['0']
-        }
-
-        filtering_best = {
-            'Valid data' : ['0'],
-            'Cloud state' : ['00'],
-            'Cloud shadow flag' : ['0'],
-            'Snow flag' : ['0'],
-            'Water flag': ['0', '1'],
-            'Aerosol state' : ['00'],
-            'Subzero flag' : ['0'],
-            'Saturation flag' : ['0'],
-            'High sun zenith flag' : ['0'],
-            'Illumination state' : ['00'],
-            'Slope flag' : ['0', '1'],
-            'Water vapor flag' : ['0', '1'],
-            'Empty' : ['0']
-        }
-
-        if self.best_cso:
-            filtering_list = filtering_best
-        else:
-            filtering_list = filtering_default
+        filtering_list = config.QAI_FILTER_BEST if self.best_cso else config.QAI_FILTER_DEFAULT
         cso_value = [''.join(p) for p in product(*filtering_list.values())]
         cso_value = [x[::-1] for x in cso_value]
         cso_value = [int(x, 2) for x in cso_value]

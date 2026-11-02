@@ -16,7 +16,24 @@ fa = forcearray('/data/level2', 'X0001_Y0001', '20200101', '20201231',
 mean = fa.get_data_mean(toInt16=True)                       # (rows, cols, bands)
 te   = fa.get_data_te(time_step=16, toInt16=True)           # (intervals, rows, cols, bands)
 stm  = fa.get_data_stm([0.1, 0.5, 0.9], toInt16=True)       # (quantiles, rows, cols, bands)
+
+raw_stack, date_list, sensor_list = fa.get_rawdata()        # (images, rows, cols, bands)
 ```
+
+## Raw time series (`get_rawdata`)
+Returns every image in the date range as one int16 stack, with pixels that are not valid in the QAI set to `nodata`
+(default `-9999`), plus the date and sensor of each image:
+
+```python
+raw_stack, date_list, sensor_list = fa.get_rawdata()
+raw_stack.shape   # (n_images, rows, cols, bands)
+date_list         # ['20200105', '20200121', ...]
+sensor_list       # ['LND08', 'LND09', ...]
+```
+
+Images are sorted by date. `drop_empty=True` leaves out images with no valid pixel (e.g. fully cloudy).
+The whole stack is held in memory (`n_images * rows * cols * bands * 2` bytes), so use a block or `pixels`
+for long time series; with `pixels` the stack is `(n_images, n_pixels, bands)`.
 
 Optional arguments of `forcearray(...)`:
 
@@ -85,6 +102,11 @@ fa.pixels_coords                       # map coordinates (x, y) of each pixel's 
 ```
 
 `pixels` was called `points` before; `points=`, `points_xy` and `points_coords` still work but are deprecated.
+
+# Settings (`forcearray/config.py`)
+The band numbers (`LS_BANDLIST`, `S2_BANDLIST`) and the QAI filters (`QAI_FILTER_DEFAULT`, and `QAI_FILTER_BEST`
+used with `best_cso=True`) are in `forcearray/config.py`. Edit that file to add bands or change which QAI flags count
+as valid; the comments at the top of the file explain the format.
 
 # Performance
 * QAI images are never stacked: each one becomes a valid-pixel mask through a lookup table and is then dropped.
