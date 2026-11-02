@@ -2,7 +2,7 @@
 
 # Install
 ```
-pip install git+https://github.com/vudongpham/ForceArray.git
+pip install --force-reinstall --no-deps git+https://github.com/vudongpham/ForceArray.git
 ```
 
 
