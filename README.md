@@ -28,6 +28,16 @@ Optional arguments of `forcearray(...)`:
 | `max_memory_mb` | `4096` | Approximate budget for working buffers (the block size in `get_data_stm`, read-ahead in the other methods). Output arrays are not counted. |
 | `topleft_xy` | `None` | `(X, Y)` top-left pixel of the block to read (X = column, Y = row), inclusive. Default `(0, 0)`. |
 | `bottomright_xy` | `None` | `(X, Y)` bottom-right pixel of the block, exclusive. Default: the tile's bottom-right corner (whole tile). |
+| `points` | `None` | List of `(X, Y)` pixels to read in one pass (see below). Cannot be combined with `topleft_xy` / `bottomright_xy`. |
+| `gdal_options` | `{'GDAL_DISABLE_READDIR_ON_OPEN': 'EMPTY_DIR'}` | GDAL config options used while reading. The default stops GDAL from listing the tile folder on every file open; pass `{}` for GDAL defaults. |
+
+## Temporal intervals (`get_data_te`)
+Intervals start at `start_date` and are `time_step` days long (Feb 29 is not counted, so intervals line up across years).
+The last interval ends at `end_date` and can be shorter than `time_step`; no image in the date range is dropped.
+
+```python
+starts, ends = fa.get_te_dates(time_step=10)   # first / last day (inclusive) of each interval
+```
 
 ## Reading a small block
 Only the requested pixels are read from each file, which is much faster than reading the whole tile.
@@ -52,6 +62,24 @@ To write a block result as GeoTIFF, pass the block's transform:
 ```python
 from forcearray.forcearray import toRaster
 toRaster(np.moveaxis(mean, -1, 0), None, 'mean_block.tif', transform=fa.transform, crs=fa.crs)
+```
+
+## Reading single pixels
+For one pixel, use a 1 x 1 block: `topleft_xy=(X, Y), bottomright_xy=(X + 1, Y + 1)`.
+
+For several pixels, pass them all with `points`. Each file is then opened once per image, and each internal
+GeoTIFF block is decoded once, however many points it holds. This is much faster than one 1 x 1 block per pixel
+(about 40x per pixel for 100 random points in a test with 10 years of Landsat images).
+
+```python
+fa = forcearray('/data/level2', 'X0001_Y0001', '20150101', '20241231',
+                sensors='LND08,LND09', bandlist=['BLU', 'GRN', 'RED', 'NIR', 'SW1', 'SW2'],
+                points=[(523, 777), (10, 20), (999, 0)])
+
+te   = fa.get_data_te(time_step=10)    # (intervals, n_points, bands)
+mean = fa.get_data_mean()              # (n_points, bands)
+stm  = fa.get_data_stm([0.1, 0.5])     # (quantiles, n_points, bands)
+fa.points_coords                       # map coordinates (x, y) of each point's centre
 ```
 
 # Performance

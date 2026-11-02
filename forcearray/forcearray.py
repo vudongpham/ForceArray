@@ -20,6 +20,13 @@ Performance notes
   setting ``tile_size``; they are resampled on the fly as they are read.
 * ``topleft_xy`` / ``bottomright_xy`` restrict every read to a pixel block
   of the tile, so only that part of each file is decoded.
+* ``points`` reads any number of single pixels in one pass: each file is
+  opened once per image and each internal GeoTIFF block that holds points is
+  decoded once, however many points it holds.
+* GDAL is told not to list the tile folder when it opens a file
+  (``GDAL_DISABLE_READDIR_ON_OPEN=EMPTY_DIR``). A FORCE tile folder holds
+  thousands of files, and that listing is a large share of the cost of a
+  small read.
 """
 
 from collections import deque
@@ -129,7 +136,8 @@ class forcearray():
     def __init__(self, level2_dir, tile, start_date, end_date, sensors, bandlist,
                  best_cso=False, tile_size=None, resampling='nearest',
                  n_workers=None, max_memory_mb=4096,
-                 topleft_xy=None, bottomright_xy=None, target_size=None):
+                 topleft_xy=None, bottomright_xy=None, points=None,
+                 gdal_options=None, target_size=None):
         """
         Parameters
         ----------
@@ -165,18 +173,37 @@ class forcearray():
             exclusive, so ``topleft_xy=(0, 0), bottomright_xy=(10, 10)``
             gives a 10 x 10 block. Defaults: (0, 0) and the bottom-right
             corner of the tile, i.e. the whole tile.
-
+        points : None or sequence of (X, Y)
+            Read only these pixels (same coordinates as ``topleft_xy``).
+            Faster than a 1 x 1 block per pixel because every file is read
+            once for all points. The row axis is dropped from the results:
+            ``get_data_mean`` -> (n_points, bands), ``get_data_te`` ->
+            (n_intervals, n_points, bands), ``get_data_stm`` ->
+            (n_quantiles, n_points, bands). Cannot be combined with
+            ``topleft_xy`` / ``bottomright_xy``.
+        gdal_options : None or dict
+            GDAL configuration options set while reading. Default:
+            ``{'GDAL_DISABLE_READDIR_ON_OPEN': 'EMPTY_DIR'}``, which skips
+            listing the tile folder each time a file is opened (side-car
+            files such as .aux.xml or .ovr are then ignored). Pass ``{}`` to
+            use GDAL's defaults.
         target_size
             Deprecated name of ``tile_size``.
 
         Attributes
         ----------
         shape : (rows, cols)
-            Size of the arrays returned (the block size).
+            Size of the arrays returned (the block size). ``(1, n_points)``
+            internally with ``points``.
         grid_shape : (rows, cols)
             Size of the whole tile on the output grid.
         transform, crs
-            Georeferencing of the block (None if no image was found).
+            Georeferencing of the block (None if no image was found, or with
+            ``points``).
+        points_xy : (n_points, 2) int array or None
+            Pixel coordinates (X, Y) of ``points``.
+        points_coords : (n_points, 2) float array or None
+            Map coordinates (x, y in ``crs``) of the centre of each point.
         """
         if target_size is not None:
             if tile_size is not None:
@@ -192,6 +219,8 @@ class forcearray():
         self.bandlist = list(bandlist)
         self.n_workers = n_workers or os.cpu_count() or 4
         self.max_memory_mb = max_memory_mb
+        self.gdal_options = {'GDAL_DISABLE_READDIR_ON_OPEN': 'EMPTY_DIR'} \
+            if gdal_options is None else dict(gdal_options)
         self.resampling = getattr(Resampling, resampling) if isinstance(resampling, str) else resampling
         self.LS_allowed_sensors = ['LND04', 'LND05', 'LND07', 'LND08', 'LND09']
         self.S2_allowed_sensors = ['SEN2A', 'SEN2B', 'SEN2C']
@@ -235,16 +264,31 @@ class forcearray():
         self._qai_lut = np.zeros(65536, dtype=bool)
         self._qai_lut[np.asarray(self.cso_list, dtype=np.int64)] = True
 
-        # Output grid and block
-        self.grid_shape, self._row_align, grid_transform, self.crs = self.__resolve_grid(tile_size)
-        self._offset, self.shape = self.__resolve_block(topleft_xy, bottomright_xy)
-        x0, y0 = self._offset
-        self.transform = None if grid_transform is None \
-            else grid_transform * Affine.translation(x0, y0)
-        # Blocks of get_data_stm only line up with the GeoTIFF internal
-        # blocks if the block starts on one of their boundaries.
-        if self._row_align and y0 % self._row_align:
+        # Output grid and block (or points)
+        (self.grid_shape, self._row_align, grid_transform, self.crs,
+         self._grid_block) = self.__resolve_grid(tile_size)
+        self.points_xy = self.points_coords = None
+        self._point_groups = None
+        if points is not None:
+            if topleft_xy is not None or bottomright_xy is not None:
+                raise ValueError('Use either points or topleft_xy/bottomright_xy, not both.')
+            self.points_xy = self.__resolve_points(points)
+            self._point_groups = self.__group_points(self.points_xy)
+            self._offset, self.shape = (0, 0), (1, len(self.points_xy))
             self._row_align = None
+            self.transform = None
+            if grid_transform is not None:
+                xs, ys = grid_transform * (self.points_xy[:, 0] + 0.5, self.points_xy[:, 1] + 0.5)
+                self.points_coords = np.column_stack([xs, ys])
+        else:
+            self._offset, self.shape = self.__resolve_block(topleft_xy, bottomright_xy)
+            x0, y0 = self._offset
+            self.transform = None if grid_transform is None \
+                else grid_transform * Affine.translation(x0, y0)
+            # Blocks of get_data_stm only line up with the GeoTIFF internal
+            # blocks if the block starts on one of their boundaries.
+            if self._row_align and y0 % self._row_align:
+                self._row_align = None
 
     # ------------------------------------------------------------------ #
     # Public API
@@ -252,8 +296,46 @@ class forcearray():
     def get_data_te(self, time_step, nodata=-9999, toInt16=False, trackProgress=False):
         """Temporal mean over consecutive ``time_step``-day intervals.
 
-        Returns an array of shape (n_intervals, rows, cols, bands).
+        Returns an array of shape (n_intervals, rows, cols, bands). Intervals
+        start at ``start_date`` and are ``time_step`` days long (Feb 29 is
+        not counted). The last interval ends at ``end_date`` and can be
+        shorter. ``get_te_dates`` gives the dates of each interval.
         """
+        with rasterio.Env(**self.gdal_options):
+            return self._squeeze_points(
+                self._get_data_te(time_step, nodata, toInt16, trackProgress))
+
+    def get_te_dates(self, time_step):
+        """First and last day (both inclusive) of each ``get_data_te`` interval.
+
+        Returns two ``datetime64[D]`` arrays of length n_intervals.
+        """
+        b = self.__generate_date_list(time_step).astype('datetime64[D]')
+        return b[:-1], b[1:] - np.timedelta64(1, 'D')
+
+    def get_data_stm(self, p_list, nodata=-9999, toInt16=False, trackProgress=False):
+        """Per-pixel quantiles (spectral-temporal metrics).
+
+        Returns an array of shape (len(p_list), rows, cols, bands), or
+        (rows, cols, bands) if ``p_list`` is a scalar.
+        """
+        with rasterio.Env(**self.gdal_options):
+            return self._squeeze_points(
+                self._get_data_stm(p_list, nodata, toInt16, trackProgress))
+
+    def get_data_mean(self, nodata=-9999, toInt16=False):
+        """Per-pixel mean of all valid observations, shape (rows, cols, bands)."""
+        with rasterio.Env(**self.gdal_options):
+            return self._squeeze_points(self._get_data_mean(nodata, toInt16))
+
+    def _squeeze_points(self, arr):
+        """With ``points``, drop the (size 1) row axis: (..., 1, n, B) -> (..., n, B)."""
+        return arr if self._point_groups is None else arr[..., 0, :, :]
+
+    # ------------------------------------------------------------------ #
+    # Computation
+    # ------------------------------------------------------------------ #
+    def _get_data_te(self, time_step, nodata, toInt16, trackProgress):
         H, W = self.shape
         B = len(self.bandlist)
         target_dates = self.__generate_date_list(time_step)
@@ -290,12 +372,7 @@ class forcearray():
             print()
         return te
 
-    def get_data_stm(self, p_list, nodata=-9999, toInt16=False, trackProgress=False):
-        """Per-pixel quantiles (spectral-temporal metrics).
-
-        Returns an array of shape (len(p_list), rows, cols, bands), or
-        (rows, cols, bands) if ``p_list`` is a scalar.
-        """
+    def _get_data_stm(self, p_list, nodata, toInt16, trackProgress):
         H, W = self.shape
         B = len(self.bandlist)
         T = len(self.boa_files)
@@ -345,8 +422,7 @@ class forcearray():
             stm = stm[0]
         return stm
 
-    def get_data_mean(self, nodata=-9999, toInt16=False):
-        """Per-pixel mean of all valid observations, shape (rows, cols, bands)."""
+    def _get_data_mean(self, nodata, toInt16):
         H, W = self.shape
         B = len(self.bandlist)
         out_dtype = np.int16 if toInt16 else np.float32
@@ -366,22 +442,35 @@ class forcearray():
     # Reading
     # ------------------------------------------------------------------ #
     def _read_window(self, path, indexes, r0, r1, resampling):
-        """Read rows [r0, r1) of the block, as (bands, r1-r0, cols)."""
-        GH, GW = self.grid_shape
-        x0, y0 = self._offset
-        h, w = r1 - r0, self.shape[1]
+        """Read rows [r0, r1) of the block, as (bands, r1-r0, cols).
+
+        With ``points``, returns (bands, 1, n_points).
+        """
         with rasterio.open(path) as src:
-            if src.height == GH and src.width == GW:
-                full = x0 == 0 and y0 + r0 == 0 and h == GH and w == GW
-                window = None if full else Window(x0, y0 + r0, w, h)
-                return src.read(indexes, window=window)
-            # Different size: map the block onto the source pixels and
-            # resample while reading.
-            sy = src.height / GH
-            sx = src.width / GW
-            window = Window(x0 * sx, (y0 + r0) * sy, w * sx, h * sy)
-            return src.read(indexes, window=window, out_shape=(len(indexes), h, w),
-                            resampling=resampling)
+            if self._point_groups is not None:
+                out = None
+                for gx, gy, gw, gh, sel, rr, cc in self._point_groups:
+                    arr = self._read_grid(src, indexes, gx, gy, gw, gh, resampling)
+                    if out is None:
+                        out = np.empty((len(indexes), 1, self.shape[1]), dtype=arr.dtype)
+                    out[:, 0, sel] = arr[:, rr, cc]
+                return out
+            x0, y0 = self._offset
+            return self._read_grid(src, indexes, x0, y0 + r0, self.shape[1], r1 - r0, resampling)
+
+    def _read_grid(self, src, indexes, x0, y0, w, h, resampling):
+        """Read the window (x0, y0, w, h) of the output grid from ``src``."""
+        GH, GW = self.grid_shape
+        if src.height == GH and src.width == GW:
+            full = x0 == 0 and y0 == 0 and h == GH and w == GW
+            return src.read(indexes, window=None if full else Window(x0, y0, w, h))
+        # Different size: map the window onto the source pixels and
+        # resample while reading.
+        sy = src.height / GH
+        sx = src.width / GW
+        window = Window(x0 * sx, y0 * sy, w * sx, h * sy)
+        return src.read(indexes, window=window, out_shape=(len(indexes), h, w),
+                        resampling=resampling)
 
     def _read_masked(self, i, r0=0, r1=None):
         """Read image ``i`` for rows [r0, r1).
@@ -456,6 +545,7 @@ class forcearray():
     def __resolve_grid(self, tile_size):
         shapes = {}
         block_h = {}
+        block_w = {}
         transforms = {}
         crs = None
         for i, f in enumerate(self.boa_files):
@@ -464,7 +554,7 @@ class forcearray():
                 continue
             with rasterio.open(os.path.join(self.tile_dir, f)) as src:
                 shapes[fam] = (src.height, src.width)
-                block_h[fam] = src.block_shapes[0][0]
+                block_h[fam], block_w[fam] = src.block_shapes[0]
                 transforms[fam] = src.transform
                 crs = src.crs if crs is None else crs
 
@@ -491,7 +581,49 @@ class forcearray():
             fam = next(iter(shapes))
             sh, sw = shapes[fam]
             transform = transforms[fam] * Affine.scale(sw / shape[1], sh / shape[0])
-        return shape, align, transform, crs
+
+        # Internal GeoTIFF block size on the output grid (smallest over the
+        # sensor families), used to group points that are decoded together.
+        grid_block = (100, max(shape[1], 1))
+        if shapes and shape[0] > 0 and shape[1] > 0:
+            grid_block = (
+                max(1, int(min(block_h[f] * shape[0] / shapes[f][0] for f in shapes))),
+                max(1, int(min(block_w[f] * shape[1] / shapes[f][1] for f in shapes))))
+        return shape, align, transform, crs, grid_block
+
+    def __resolve_points(self, points):
+        pts = np.asarray(points)
+        if pts.ndim == 1 and pts.size == 2:
+            pts = pts[np.newaxis]
+        if pts.ndim != 2 or pts.shape[1] != 2 or len(pts) == 0:
+            raise ValueError('points must be a non-empty sequence of (X, Y) pairs.')
+        if not np.all(pts == np.round(pts)):
+            raise ValueError('points must be integer pixel coordinates (X = column, Y = row).')
+        pts = pts.astype(np.int64)
+        GH, GW = self.grid_shape
+        bad = (pts[:, 0] < 0) | (pts[:, 0] >= GW) | (pts[:, 1] < 0) | (pts[:, 1] >= GH)
+        if bad.any() and (GH, GW) != (0, 0):
+            raise ValueError(
+                f'points {pts[bad][:5].tolist()} are outside the tile of {GW} x {GH} pixels '
+                f'(need 0 <= X < {GW} and 0 <= Y < {GH}).')
+        return pts
+
+    def __group_points(self, pts):
+        """Group points by internal GeoTIFF block, so each block is read once.
+
+        Returns a list of (x0, y0, w, h, sel, rr, cc): the grid window to read,
+        the indices of its points, and their row/col inside the window.
+        """
+        bh, bw = self._grid_block
+        keys = (pts[:, 1] // bh) * (pts[:, 0].max() // bw + 1) + pts[:, 0] // bw
+        groups = []
+        for k in np.unique(keys):
+            sel = np.flatnonzero(keys == k)
+            xs, ys = pts[sel, 0], pts[sel, 1]
+            x0, y0 = int(xs.min()), int(ys.min())
+            groups.append((x0, y0, int(xs.max()) - x0 + 1, int(ys.max()) - y0 + 1,
+                           sel, ys - y0, xs - x0))
+        return groups
 
     def __resolve_block(self, topleft_xy, bottomright_xy):
         """Return ((x0, y0), (rows, cols)) of the block to read."""
@@ -524,7 +656,7 @@ class forcearray():
         return [table[b] for b in self.bandlist]
 
     # ------------------------------------------------------------------ #
-    # Helpers (unchanged logic)
+    # Helpers
     # ------------------------------------------------------------------ #
     def __generate_date_list(self, time_step):
         start = datetime.strptime(self.start_date, "%Y%m%d")
@@ -533,9 +665,8 @@ class forcearray():
         d = start
         noleap_days = 0
 
-        # Add start if it's not Feb 29
-        if not (d.month == 2 and d.day == 29):
-            date_list.append(d.strftime("%Y%m%d"))
+        # The first interval always starts at start_date (even on Feb 29).
+        date_list.append(d.strftime("%Y%m%d"))
 
         d += timedelta(days=1)
         while d <= end:
@@ -548,6 +679,12 @@ class forcearray():
             if noleap_days % time_step == 0:
                 date_list.append(d.strftime("%Y%m%d"))
             d += timedelta(days=1)
+
+        # Close the last interval the day after end_date, so images after the
+        # last full interval are kept (in a shorter final interval) instead of
+        # being dropped. Intervals are [boundary_k, boundary_k+1).
+        if end >= start:
+            date_list.append((end + timedelta(days=1)).strftime("%Y%m%d"))
 
         date_list = np.array(
             [datetime.strptime(date_str, "%Y%m%d") for date_str in date_list],
