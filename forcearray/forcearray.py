@@ -20,9 +20,9 @@ Performance notes
   setting ``tile_size``; they are resampled on the fly as they are read.
 * ``topleft_xy`` / ``bottomright_xy`` restrict every read to a pixel block
   of the tile, so only that part of each file is decoded.
-* ``points`` reads any number of single pixels in one pass: each file is
-  opened once per image and each internal GeoTIFF block that holds points is
-  decoded once, however many points it holds.
+* ``pixels`` reads any number of single pixels in one pass: each file is
+  opened once per image and each internal GeoTIFF block that holds pixels is
+  decoded once, however many pixels it holds.
 * GDAL is told not to list the tile folder when it opens a file
   (``GDAL_DISABLE_READDIR_ON_OPEN=EMPTY_DIR``). A FORCE tile folder holds
   thousands of files, and that listing is a large share of the cost of a
@@ -42,6 +42,17 @@ from rasterio.enums import Resampling
 from rasterio.windows import Window
 from affine import Affine
 from numba import njit, prange
+
+
+def _amul(a, b):
+    """``a @ b`` for Affine transforms (or a transform and a point).
+
+    affine 3 deprecates ``*`` in favour of ``@``; older versions only have ``*``.
+    """
+    try:
+        return a @ b
+    except TypeError:
+        return a * b
 
 
 VALID_MIN = 0
@@ -136,8 +147,8 @@ class forcearray():
     def __init__(self, level2_dir, tile, start_date, end_date, sensors, bandlist,
                  best_cso=False, tile_size=None, resampling='nearest',
                  n_workers=None, max_memory_mb=4096,
-                 topleft_xy=None, bottomright_xy=None, points=None,
-                 gdal_options=None, target_size=None):
+                 topleft_xy=None, bottomright_xy=None, pixels=None,
+                 gdal_options=None, target_size=None, points=None):
         """
         Parameters
         ----------
@@ -173,13 +184,13 @@ class forcearray():
             exclusive, so ``topleft_xy=(0, 0), bottomright_xy=(10, 10)``
             gives a 10 x 10 block. Defaults: (0, 0) and the bottom-right
             corner of the tile, i.e. the whole tile.
-        points : None or sequence of (X, Y)
+        pixels : None or sequence of (X, Y)
             Read only these pixels (same coordinates as ``topleft_xy``).
             Faster than a 1 x 1 block per pixel because every file is read
-            once for all points. The row axis is dropped from the results:
-            ``get_data_mean`` -> (n_points, bands), ``get_data_te`` ->
-            (n_intervals, n_points, bands), ``get_data_stm`` ->
-            (n_quantiles, n_points, bands). Cannot be combined with
+            once for all pixels. The row axis is dropped from the results:
+            ``get_data_mean`` -> (n_pixels, bands), ``get_data_te`` ->
+            (n_intervals, n_pixels, bands), ``get_data_stm`` ->
+            (n_quantiles, n_pixels, bands). Cannot be combined with
             ``topleft_xy`` / ``bottomright_xy``.
         gdal_options : None or dict
             GDAL configuration options set while reading. Default:
@@ -189,21 +200,23 @@ class forcearray():
             use GDAL's defaults.
         target_size
             Deprecated name of ``tile_size``.
+        points
+            Deprecated name of ``pixels``.
 
         Attributes
         ----------
         shape : (rows, cols)
-            Size of the arrays returned (the block size). ``(1, n_points)``
-            internally with ``points``.
+            Size of the arrays returned (the block size). ``(1, n_pixels)``
+            internally with ``pixels``.
         grid_shape : (rows, cols)
             Size of the whole tile on the output grid.
         transform, crs
             Georeferencing of the block (None if no image was found, or with
-            ``points``).
-        points_xy : (n_points, 2) int array or None
-            Pixel coordinates (X, Y) of ``points``.
-        points_coords : (n_points, 2) float array or None
-            Map coordinates (x, y in ``crs``) of the centre of each point.
+            ``pixels``).
+        pixels_xy : (n_pixels, 2) int array or None
+            Pixel coordinates (X, Y) of ``pixels``.
+        pixels_coords : (n_pixels, 2) float array or None
+            Map coordinates (x, y in ``crs``) of the centre of each pixel.
         """
         if target_size is not None:
             if tile_size is not None:
@@ -211,6 +224,12 @@ class forcearray():
             warnings.warn('target_size is deprecated, use tile_size instead.',
                           DeprecationWarning, stacklevel=2)
             tile_size = target_size
+        if points is not None:
+            if pixels is not None:
+                raise TypeError('Pass pixels only (points is its deprecated name).')
+            warnings.warn('points is deprecated, use pixels instead.',
+                          DeprecationWarning, stacklevel=2)
+            pixels = points
         self.tile_dir = os.path.join(level2_dir, tile)
         self.start_date = start_date
         self.end_date = end_date
@@ -264,27 +283,27 @@ class forcearray():
         self._qai_lut = np.zeros(65536, dtype=bool)
         self._qai_lut[np.asarray(self.cso_list, dtype=np.int64)] = True
 
-        # Output grid and block (or points)
+        # Output grid and block (or pixels)
         (self.grid_shape, self._row_align, grid_transform, self.crs,
          self._grid_block) = self.__resolve_grid(tile_size)
-        self.points_xy = self.points_coords = None
-        self._point_groups = None
-        if points is not None:
+        self.pixels_xy = self.pixels_coords = None
+        self._pixel_groups = None
+        if pixels is not None:
             if topleft_xy is not None or bottomright_xy is not None:
-                raise ValueError('Use either points or topleft_xy/bottomright_xy, not both.')
-            self.points_xy = self.__resolve_points(points)
-            self._point_groups = self.__group_points(self.points_xy)
-            self._offset, self.shape = (0, 0), (1, len(self.points_xy))
+                raise ValueError('Use either pixels or topleft_xy/bottomright_xy, not both.')
+            self.pixels_xy = self.__resolve_pixels(pixels)
+            self._pixel_groups = self.__group_pixels(self.pixels_xy)
+            self._offset, self.shape = (0, 0), (1, len(self.pixels_xy))
             self._row_align = None
             self.transform = None
             if grid_transform is not None:
-                xs, ys = grid_transform * (self.points_xy[:, 0] + 0.5, self.points_xy[:, 1] + 0.5)
-                self.points_coords = np.column_stack([xs, ys])
+                xs, ys = _amul(grid_transform, (self.pixels_xy[:, 0] + 0.5, self.pixels_xy[:, 1] + 0.5))
+                self.pixels_coords = np.column_stack([xs, ys])
         else:
             self._offset, self.shape = self.__resolve_block(topleft_xy, bottomright_xy)
             x0, y0 = self._offset
             self.transform = None if grid_transform is None \
-                else grid_transform * Affine.translation(x0, y0)
+                else _amul(grid_transform, Affine.translation(x0, y0))
             # Blocks of get_data_stm only line up with the GeoTIFF internal
             # blocks if the block starts on one of their boundaries.
             if self._row_align and y0 % self._row_align:
@@ -302,7 +321,7 @@ class forcearray():
         shorter. ``get_te_dates`` gives the dates of each interval.
         """
         with rasterio.Env(**self.gdal_options):
-            return self._squeeze_points(
+            return self._squeeze_pixels(
                 self._get_data_te(time_step, nodata, toInt16, trackProgress))
 
     def get_te_dates(self, time_step):
@@ -320,17 +339,30 @@ class forcearray():
         (rows, cols, bands) if ``p_list`` is a scalar.
         """
         with rasterio.Env(**self.gdal_options):
-            return self._squeeze_points(
+            return self._squeeze_pixels(
                 self._get_data_stm(p_list, nodata, toInt16, trackProgress))
 
     def get_data_mean(self, nodata=-9999, toInt16=False):
         """Per-pixel mean of all valid observations, shape (rows, cols, bands)."""
         with rasterio.Env(**self.gdal_options):
-            return self._squeeze_points(self._get_data_mean(nodata, toInt16))
+            return self._squeeze_pixels(self._get_data_mean(nodata, toInt16))
 
-    def _squeeze_points(self, arr):
-        """With ``points``, drop the (size 1) row axis: (..., 1, n, B) -> (..., n, B)."""
-        return arr if self._point_groups is None else arr[..., 0, :, :]
+    # Deprecated attribute names (``points`` was renamed to ``pixels``).
+    @property
+    def points_xy(self):
+        warnings.warn('points_xy is deprecated, use pixels_xy instead.',
+                      DeprecationWarning, stacklevel=2)
+        return self.pixels_xy
+
+    @property
+    def points_coords(self):
+        warnings.warn('points_coords is deprecated, use pixels_coords instead.',
+                      DeprecationWarning, stacklevel=2)
+        return self.pixels_coords
+
+    def _squeeze_pixels(self, arr):
+        """With ``pixels``, drop the (size 1) row axis: (..., 1, n, B) -> (..., n, B)."""
+        return arr if self._pixel_groups is None else arr[..., 0, :, :]
 
     # ------------------------------------------------------------------ #
     # Computation
@@ -444,12 +476,12 @@ class forcearray():
     def _read_window(self, path, indexes, r0, r1, resampling):
         """Read rows [r0, r1) of the block, as (bands, r1-r0, cols).
 
-        With ``points``, returns (bands, 1, n_points).
+        With ``pixels``, returns (bands, 1, n_pixels).
         """
         with rasterio.open(path) as src:
-            if self._point_groups is not None:
+            if self._pixel_groups is not None:
                 out = None
-                for gx, gy, gw, gh, sel, rr, cc in self._point_groups:
+                for gx, gy, gw, gh, sel, rr, cc in self._pixel_groups:
                     arr = self._read_grid(src, indexes, gx, gy, gw, gh, resampling)
                     if out is None:
                         out = np.empty((len(indexes), 1, self.shape[1]), dtype=arr.dtype)
@@ -580,10 +612,10 @@ class forcearray():
         if shapes and shape[0] > 0 and shape[1] > 0:
             fam = next(iter(shapes))
             sh, sw = shapes[fam]
-            transform = transforms[fam] * Affine.scale(sw / shape[1], sh / shape[0])
+            transform = _amul(transforms[fam], Affine.scale(sw / shape[1], sh / shape[0]))
 
         # Internal GeoTIFF block size on the output grid (smallest over the
-        # sensor families), used to group points that are decoded together.
+        # sensor families), used to group pixels that are decoded together.
         grid_block = (100, max(shape[1], 1))
         if shapes and shape[0] > 0 and shape[1] > 0:
             grid_block = (
@@ -591,28 +623,28 @@ class forcearray():
                 max(1, int(min(block_w[f] * shape[1] / shapes[f][1] for f in shapes))))
         return shape, align, transform, crs, grid_block
 
-    def __resolve_points(self, points):
-        pts = np.asarray(points)
+    def __resolve_pixels(self, pixels):
+        pts = np.asarray(pixels)
         if pts.ndim == 1 and pts.size == 2:
             pts = pts[np.newaxis]
         if pts.ndim != 2 or pts.shape[1] != 2 or len(pts) == 0:
-            raise ValueError('points must be a non-empty sequence of (X, Y) pairs.')
+            raise ValueError('pixels must be a non-empty sequence of (X, Y) pairs.')
         if not np.all(pts == np.round(pts)):
-            raise ValueError('points must be integer pixel coordinates (X = column, Y = row).')
+            raise ValueError('pixels must be integer pixel coordinates (X = column, Y = row).')
         pts = pts.astype(np.int64)
         GH, GW = self.grid_shape
         bad = (pts[:, 0] < 0) | (pts[:, 0] >= GW) | (pts[:, 1] < 0) | (pts[:, 1] >= GH)
         if bad.any() and (GH, GW) != (0, 0):
             raise ValueError(
-                f'points {pts[bad][:5].tolist()} are outside the tile of {GW} x {GH} pixels '
+                f'pixels {pts[bad][:5].tolist()} are outside the tile of {GW} x {GH} pixels '
                 f'(need 0 <= X < {GW} and 0 <= Y < {GH}).')
         return pts
 
-    def __group_points(self, pts):
-        """Group points by internal GeoTIFF block, so each block is read once.
+    def __group_pixels(self, pts):
+        """Group pixels by internal GeoTIFF block, so each block is read once.
 
         Returns a list of (x0, y0, w, h, sel, rr, cc): the grid window to read,
-        the indices of its points, and their row/col inside the window.
+        the indices of its pixels, and their row/col inside the window.
         """
         bh, bw = self._grid_block
         keys = (pts[:, 1] // bh) * (pts[:, 0].max() // bw + 1) + pts[:, 0] // bw
