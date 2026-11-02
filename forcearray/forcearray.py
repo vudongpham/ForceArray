@@ -347,6 +347,36 @@ class forcearray():
         with rasterio.Env(**self.gdal_options):
             return self._squeeze_pixels(self._get_data_mean(nodata, toInt16))
 
+    def get_rawdata(self, nodata=-9999, drop_empty=False, trackProgress=False):
+        """Stack of every image, masked with its QAI.
+
+        Returns ``(raw_stack, date_list, sensor_list)``:
+
+        raw_stack : int16 array of shape (n_images, rows, cols, bands)
+            (``(n_images, n_pixels, bands)`` with ``pixels``). Pixels that are
+            not valid in the QAI (or outside 0..10000) are set to ``nodata``.
+        date_list : list of str
+            Acquisition date 'YYYYMMDD' of each image.
+        sensor_list : list of str
+            Sensor of each image, e.g. 'LND08' or 'SEN2A'.
+
+        Images are sorted by date. With ``drop_empty=True``, images without
+        any valid pixel (in the block / pixels read) are left out.
+
+        The whole stack is held in memory: about
+        n_images * rows * cols * bands * 2 bytes.
+        """
+        with rasterio.Env(**self.gdal_options):
+            stack, keep = self._get_rawdata(nodata, trackProgress)
+        if drop_empty:
+            stack = stack[keep]
+            idx = np.flatnonzero(keep)
+        else:
+            idx = range(len(self.boa_files))
+        date_list = [self.boa_files[i][:8] for i in idx]
+        sensor_list = [self.sensor_list[i] for i in idx]
+        return self._squeeze_pixels(stack), date_list, sensor_list
+
     # Deprecated attribute names (``points`` was renamed to ``pixels``).
     @property
     def points_xy(self):
@@ -453,6 +483,31 @@ class forcearray():
         if scalar_q:
             stm = stm[0]
         return stm
+
+    def _get_rawdata(self, nodata, trackProgress):
+        H, W = self.shape
+        B = len(self.bandlist)
+        T = len(self.boa_files)
+        stack = np.empty((T, H, W, B), dtype=np.int16)
+        keep = np.zeros(T, dtype=bool)
+        nodata = np.int16(nodata)
+
+        def fill(t):
+            boa, valid = self._read_masked(t)
+            if boa is None:
+                stack[t] = nodata
+                return
+            keep[t] = True
+            boa[:, ~valid] = nodata
+            stack[t] = np.moveaxis(boa, 0, -1)  # (B, H, W) -> (H, W, B)
+
+        with ThreadPoolExecutor(self.n_workers) as ex:
+            for done, _ in enumerate(ex.map(fill, range(T)), 1):
+                if trackProgress:
+                    print(f'\rReading {done}/{T}', end='', flush=True)
+        if trackProgress and T:
+            print()
+        return stack, keep
 
     def _get_data_mean(self, nodata, toInt16):
         H, W = self.shape
