@@ -17,15 +17,15 @@ mean = fa.get_data_mean(toInt16=True)                       # (rows, cols, bands
 te   = fa.get_data_te(time_step=16, toInt16=True)           # (intervals, rows, cols, bands)
 stm  = fa.get_data_stm([0.1, 0.5, 0.9], toInt16=True)       # (quantiles, rows, cols, bands)
 
-raw_stack, date_list, sensor_list = fa.get_rawdata()        # (images, rows, cols, bands)
+raw_stack, date_list, sensor_list = fa.get_data_raw()       # (images, rows, cols, bands)
 ```
 
-## Raw time series (`get_rawdata`)
+## Raw time series (`get_data_raw`)
 Returns every image in the date range as one int16 stack, with pixels that are not valid in the QAI set to `nodata`
 (default `-9999`), plus the date and sensor of each image:
 
 ```python
-raw_stack, date_list, sensor_list = fa.get_rawdata()
+raw_stack, date_list, sensor_list = fa.get_data_raw()
 raw_stack.shape   # (n_images, rows, cols, bands)
 date_list         # ['20200105', '20200121', ...]
 sensor_list       # ['LND08', 'LND09', ...]

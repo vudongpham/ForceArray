@@ -330,7 +330,7 @@ class forcearray():
         with rasterio.Env(**self.gdal_options):
             return self._squeeze_pixels(self._get_data_mean(nodata, toInt16))
 
-    def get_rawdata(self, nodata=-9999, drop_empty=False, trackProgress=False):
+    def get_data_raw(self, nodata=-9999, drop_empty=False, trackProgress=False):
         """Stack of every image, masked with its QAI.
 
         Returns ``(raw_stack, date_list, sensor_list)``:
@@ -350,7 +350,7 @@ class forcearray():
         n_images * rows * cols * bands * 2 bytes.
         """
         with rasterio.Env(**self.gdal_options):
-            stack, keep = self._get_rawdata(nodata, trackProgress)
+            stack, keep = self._get_data_raw(nodata, trackProgress)
         if drop_empty:
             stack = stack[keep]
             idx = np.flatnonzero(keep)
@@ -467,7 +467,7 @@ class forcearray():
             stm = stm[0]
         return stm
 
-    def _get_rawdata(self, nodata, trackProgress):
+    def _get_data_raw(self, nodata, trackProgress):
         H, W = self.shape
         B = len(self.bandlist)
         T = len(self.boa_files)
