@@ -17,7 +17,9 @@ Performance notes
 * Files are read in parallel by a thread pool (GDAL releases the GIL while
   decoding).
 * Landsat (1000 x 1000) and Sentinel-2 (3000 x 3000) images can be mixed by
-  setting ``target_size``; they are resampled on the fly as they are read.
+  setting ``tile_size``; they are resampled on the fly as they are read.
+* ``topleft_xy`` / ``bottomright_xy`` restrict every read to a pixel block
+  of the tile, so only that part of each file is decoded.
 """
 
 from collections import deque
@@ -25,11 +27,13 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from itertools import product
 import os
+import warnings
 
 import numpy as np
 import rasterio
 from rasterio.enums import Resampling
 from rasterio.windows import Window
+from affine import Affine
 from numba import njit, prange
 
 
@@ -37,14 +41,22 @@ VALID_MIN = 0
 VALID_MAX = 10000
 
 
-def toRaster(arr_in, base_raster, out_raster):
-    """Write an array of shape (bands, rows, cols) as an int16 GeoTIFF."""
+def toRaster(arr_in, base_raster, out_raster, transform=None, crs=None):
+    """Write an array of shape (bands, rows, cols) as an int16 GeoTIFF.
+
+    ``base_raster`` gives the CRS and transform. When the array covers only a
+    block of the tile (``topleft_xy`` / ``bottomright_xy``), pass
+    ``transform=fa.transform`` (and optionally ``crs=fa.crs``) so the output
+    is georeferenced to the block; ``base_raster`` can then be None.
+    """
     arr_in = np.asarray(arr_in)
     if arr_in.ndim == 2:
         arr_in = arr_in[np.newaxis]
-    with rasterio.open(base_raster) as src:
-        band_crs = src.crs
-        band_tranform = src.transform
+    band_crs, band_tranform = crs, transform
+    if band_crs is None or band_tranform is None:
+        with rasterio.open(base_raster) as src:
+            band_crs = src.crs if band_crs is None else band_crs
+            band_tranform = src.transform if band_tranform is None else band_tranform
 
     meta = {
         "driver": "GTiff",
@@ -115,8 +127,9 @@ def _quantile_kernel(stack, q, nodata, out):
 
 class forcearray():
     def __init__(self, level2_dir, tile, start_date, end_date, sensors, bandlist,
-                 best_cso=False, target_size=None, resampling='nearest',
-                 n_workers=None, max_memory_mb=4096):
+                 best_cso=False, tile_size=None, resampling='nearest',
+                 n_workers=None, max_memory_mb=4096,
+                 topleft_xy=None, bottomright_xy=None, target_size=None):
         """
         Parameters
         ----------
@@ -130,7 +143,7 @@ class forcearray():
             For example ['BLU', 'GRN', 'RED', 'NIR', 'SW1', 'SW2'].
         best_cso : bool
             Use the stricter QAI filter.
-        target_size : None, int or (rows, cols)
+        tile_size : None, int or (rows, cols)
             Output grid size. ``None`` keeps the native size, which works
             only when every image has the same size. Set it, for example to
             1000 or 3000, to mix Landsat and Sentinel-2. Images are then
@@ -145,7 +158,32 @@ class forcearray():
             Approximate memory budget for buffers (blocks in ``get_data_stm``
             and images read ahead in the streaming methods). Output arrays
             are not counted.
+        topleft_xy, bottomright_xy : None or (X, Y)
+            Read only a block of the tile. X is the column and Y the row, in
+            pixels of the output grid (the native size, or ``tile_size``
+            if set). ``topleft_xy`` is inclusive, ``bottomright_xy`` is
+            exclusive, so ``topleft_xy=(0, 0), bottomright_xy=(10, 10)``
+            gives a 10 x 10 block. Defaults: (0, 0) and the bottom-right
+            corner of the tile, i.e. the whole tile.
+
+        target_size
+            Deprecated name of ``tile_size``.
+
+        Attributes
+        ----------
+        shape : (rows, cols)
+            Size of the arrays returned (the block size).
+        grid_shape : (rows, cols)
+            Size of the whole tile on the output grid.
+        transform, crs
+            Georeferencing of the block (None if no image was found).
         """
+        if target_size is not None:
+            if tile_size is not None:
+                raise TypeError('Pass tile_size only (target_size is its deprecated name).')
+            warnings.warn('target_size is deprecated, use tile_size instead.',
+                          DeprecationWarning, stacklevel=2)
+            tile_size = target_size
         self.tile_dir = os.path.join(level2_dir, tile)
         self.start_date = start_date
         self.end_date = end_date
@@ -197,8 +235,16 @@ class forcearray():
         self._qai_lut = np.zeros(65536, dtype=bool)
         self._qai_lut[np.asarray(self.cso_list, dtype=np.int64)] = True
 
-        # Output grid
-        self.shape, self._row_align = self.__resolve_grid(target_size)
+        # Output grid and block
+        self.grid_shape, self._row_align, grid_transform, self.crs = self.__resolve_grid(tile_size)
+        self._offset, self.shape = self.__resolve_block(topleft_xy, bottomright_xy)
+        x0, y0 = self._offset
+        self.transform = None if grid_transform is None \
+            else grid_transform * Affine.translation(x0, y0)
+        # Blocks of get_data_stm only line up with the GeoTIFF internal
+        # blocks if the block starts on one of their boundaries.
+        if self._row_align and y0 % self._row_align:
+            self._row_align = None
 
     # ------------------------------------------------------------------ #
     # Public API
@@ -320,15 +366,21 @@ class forcearray():
     # Reading
     # ------------------------------------------------------------------ #
     def _read_window(self, path, indexes, r0, r1, resampling):
-        """Read rows [r0, r1) of the output grid, as (bands, r1-r0, W)."""
-        H, W = self.shape
+        """Read rows [r0, r1) of the block, as (bands, r1-r0, cols)."""
+        GH, GW = self.grid_shape
+        x0, y0 = self._offset
+        h, w = r1 - r0, self.shape[1]
         with rasterio.open(path) as src:
-            if src.height == H and src.width == W:
-                window = None if (r0 == 0 and r1 == H) else Window(0, r0, W, r1 - r0)
+            if src.height == GH and src.width == GW:
+                full = x0 == 0 and y0 + r0 == 0 and h == GH and w == GW
+                window = None if full else Window(x0, y0 + r0, w, h)
                 return src.read(indexes, window=window)
-            sy = src.height / H
-            window = Window(0, r0 * sy, src.width, (r1 - r0) * sy)
-            return src.read(indexes, window=window, out_shape=(len(indexes), r1 - r0, W),
+            # Different size: map the block onto the source pixels and
+            # resample while reading.
+            sy = src.height / GH
+            sx = src.width / GW
+            window = Window(x0 * sx, (y0 + r0) * sy, w * sx, h * sy)
+            return src.read(indexes, window=window, out_shape=(len(indexes), h, w),
                             resampling=resampling)
 
     def _read_masked(self, i, r0=0, r1=None):
@@ -401,9 +453,11 @@ class forcearray():
             rows -= rows % align  # line blocks up with the GeoTIFF internal blocks
         return rows
 
-    def __resolve_grid(self, target_size):
+    def __resolve_grid(self, tile_size):
         shapes = {}
         block_h = {}
+        transforms = {}
+        crs = None
         for i, f in enumerate(self.boa_files):
             fam = 'LS' if self.sensor_list[i] in self.LS_allowed_sensors else 'S2'
             if fam in shapes:
@@ -411,10 +465,12 @@ class forcearray():
             with rasterio.open(os.path.join(self.tile_dir, f)) as src:
                 shapes[fam] = (src.height, src.width)
                 block_h[fam] = src.block_shapes[0][0]
+                transforms[fam] = src.transform
+                crs = src.crs if crs is None else crs
 
-        if target_size is not None:
-            shape = (int(target_size), int(target_size)) if np.isscalar(target_size) \
-                else tuple(int(x) for x in target_size)
+        if tile_size is not None:
+            shape = (int(tile_size), int(tile_size)) if np.isscalar(tile_size) \
+                else tuple(int(x) for x in tile_size)
         elif not shapes:
             shape = (0, 0)
         elif len(set(shapes.values())) == 1:
@@ -422,13 +478,38 @@ class forcearray():
         else:
             raise ValueError(
                 f'Images have different sizes {shapes} (Landsat and Sentinel-2 mixed). '
-                'Set target_size, e.g. target_size=1000 or target_size=3000.')
+                'Set tile_size, e.g. tile_size=1000 or tile_size=3000.')
 
         # Only align blocks when every image is read at its native size.
         align = None
         if shapes and all(s == shape for s in shapes.values()) and len(set(block_h.values())) == 1:
             align = next(iter(block_h.values()))
-        return shape, align
+
+        # Transform of the output grid: the tile extent split into ``shape``.
+        transform = None
+        if shapes and shape[0] > 0 and shape[1] > 0:
+            fam = next(iter(shapes))
+            sh, sw = shapes[fam]
+            transform = transforms[fam] * Affine.scale(sw / shape[1], sh / shape[0])
+        return shape, align, transform, crs
+
+    def __resolve_block(self, topleft_xy, bottomright_xy):
+        """Return ((x0, y0), (rows, cols)) of the block to read."""
+        GH, GW = self.grid_shape
+        if topleft_xy is None and bottomright_xy is None:
+            return (0, 0), (GH, GW)
+        x0, y0 = (0, 0) if topleft_xy is None else (int(v) for v in topleft_xy)
+        x1, y1 = (GW, GH) if bottomright_xy is None else (int(v) for v in bottomright_xy)
+        if not self.boa_files and GH == 0 and GW == 0:
+            # No image found and no tile_size: nothing to check against.
+            return (x0, y0), (max(y1 - y0, 0), max(x1 - x0, 0))
+        if not (0 <= x0 < x1 <= GW and 0 <= y0 < y1 <= GH):
+            raise ValueError(
+                f'Invalid block topleft_xy={(x0, y0)}, bottomright_xy={(x1, y1)} for a '
+                f'tile of {GW} x {GH} pixels (X = column, Y = row). Need '
+                f'0 <= X_topleft < X_bottomright <= {GW} and '
+                f'0 <= Y_topleft < Y_bottomright <= {GH}.')
+        return (x0, y0), (y1 - y0, x1 - x0)
 
     def __band_index_for(self, sensor):
         if sensor in self.LS_allowed_sensors:
