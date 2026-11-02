@@ -103,6 +103,11 @@ fa.pixels_coords                       # map coordinates (x, y) of each pixel's 
 
 `pixels` was called `points` before; `points=`, `points_xy` and `points_coords` still work but are deprecated.
 
+# Settings (`forcearray/config.py`)
+The band numbers (`LS_BANDLIST`, `S2_BANDLIST`) and the QAI filters (`QAI_FILTER_DEFAULT`, and `QAI_FILTER_BEST`
+used with `best_cso=True`) are in `forcearray/config.py`. Edit that file to add bands or change which QAI flags count
+as valid; the comments at the top of the file explain the format.
+
 # Performance
 * QAI images are never stacked: each one becomes a valid-pixel mask through a lookup table and is then dropped.
 * BOA is skipped when its QAI has no valid pixel (fully cloudy scenes).

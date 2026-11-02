@@ -43,6 +43,8 @@ from rasterio.windows import Window
 from affine import Affine
 from numba import njit, prange
 
+from . import config
+
 
 def _amul(a, b):
     """``a @ b`` for Affine transforms (or a transform and a point).
@@ -244,27 +246,8 @@ class forcearray():
         self.LS_allowed_sensors = ['LND04', 'LND05', 'LND07', 'LND08', 'LND09']
         self.S2_allowed_sensors = ['SEN2A', 'SEN2B', 'SEN2C']
 
-        self.LS_bandlist = {
-            'BLU' : 1,
-            'GRN' : 2,
-            'RED' : 3,
-            'NIR' : 4,
-            'SW1' : 5,
-            'SW2' : 6
-        }
-
-        self.S2_bandlist = {
-            'BLU' : 1,
-            'GRN' : 2,
-            'RED' : 3,
-            'RE1' : 4,
-            'RE2' : 5,
-            'RE3' : 6,
-            'BNR' : 7,
-            'NIR' : 8,
-            'SW1' : 9,
-            'SW2' : 10
-        }
+        self.LS_bandlist = dict(config.LS_BANDLIST)
+        self.S2_bandlist = dict(config.S2_BANDLIST)
 
         # Band indices are only computed for sensor families that are
         # actually used, so S2-only bands do not fail on S2-only queries.
@@ -803,42 +786,7 @@ class forcearray():
         return boa_files, qai_files
 
     def __get_cso_value(self):
-        filtering_default = {
-            'Valid data' : ['0'],
-            'Cloud state' : ['00'],
-            'Cloud shadow flag' : ['0'],
-            'Snow flag' : ['0'],
-            'Water flag': ['0', '1'],
-            'Aerosol state' : ['00', '01', '10', '11'],
-            'Subzero flag' : ['0'],
-            'Saturation flag' : ['0'],
-            'High sun zenith flag' : ['0', '1'],
-            'Illumination state' : ['00', '01', '10', '11'],
-            'Slope flag' : ['0', '1'],
-            'Water vapor flag' : ['0', '1'],
-            'Empty' : ['0']
-        }
-
-        filtering_best = {
-            'Valid data' : ['0'],
-            'Cloud state' : ['00'],
-            'Cloud shadow flag' : ['0'],
-            'Snow flag' : ['0'],
-            'Water flag': ['0', '1'],
-            'Aerosol state' : ['00'],
-            'Subzero flag' : ['0'],
-            'Saturation flag' : ['0'],
-            'High sun zenith flag' : ['0'],
-            'Illumination state' : ['00'],
-            'Slope flag' : ['0', '1'],
-            'Water vapor flag' : ['0', '1'],
-            'Empty' : ['0']
-        }
-
-        if self.best_cso:
-            filtering_list = filtering_best
-        else:
-            filtering_list = filtering_default
+        filtering_list = config.QAI_FILTER_BEST if self.best_cso else config.QAI_FILTER_DEFAULT
         cso_value = [''.join(p) for p in product(*filtering_list.values())]
         cso_value = [x[::-1] for x in cso_value]
         cso_value = [int(x, 2) for x in cso_value]
