@@ -17,7 +17,7 @@ Performance notes
 * Files are read in parallel by a thread pool (GDAL releases the GIL while
   decoding).
 * Landsat (1000 x 1000) and Sentinel-2 (3000 x 3000) images can be mixed by
-  setting ``target_size``; they are resampled on the fly as they are read.
+  setting ``tile_size``; they are resampled on the fly as they are read.
 * ``topleft_xy`` / ``bottomright_xy`` restrict every read to a pixel block
   of the tile, so only that part of each file is decoded.
 """
@@ -27,6 +27,7 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from itertools import product
 import os
+import warnings
 
 import numpy as np
 import rasterio
@@ -126,9 +127,9 @@ def _quantile_kernel(stack, q, nodata, out):
 
 class forcearray():
     def __init__(self, level2_dir, tile, start_date, end_date, sensors, bandlist,
-                 best_cso=False, target_size=None, resampling='nearest',
+                 best_cso=False, tile_size=None, resampling='nearest',
                  n_workers=None, max_memory_mb=4096,
-                 topleft_xy=None, bottomright_xy=None):
+                 topleft_xy=None, bottomright_xy=None, target_size=None):
         """
         Parameters
         ----------
@@ -142,7 +143,7 @@ class forcearray():
             For example ['BLU', 'GRN', 'RED', 'NIR', 'SW1', 'SW2'].
         best_cso : bool
             Use the stricter QAI filter.
-        target_size : None, int or (rows, cols)
+        tile_size : None, int or (rows, cols)
             Output grid size. ``None`` keeps the native size, which works
             only when every image has the same size. Set it, for example to
             1000 or 3000, to mix Landsat and Sentinel-2. Images are then
@@ -159,11 +160,14 @@ class forcearray():
             are not counted.
         topleft_xy, bottomright_xy : None or (X, Y)
             Read only a block of the tile. X is the column and Y the row, in
-            pixels of the output grid (the native size, or ``target_size``
+            pixels of the output grid (the native size, or ``tile_size``
             if set). ``topleft_xy`` is inclusive, ``bottomright_xy`` is
             exclusive, so ``topleft_xy=(0, 0), bottomright_xy=(10, 10)``
             gives a 10 x 10 block. Defaults: (0, 0) and the bottom-right
             corner of the tile, i.e. the whole tile.
+
+        target_size
+            Deprecated name of ``tile_size``.
 
         Attributes
         ----------
@@ -174,6 +178,12 @@ class forcearray():
         transform, crs
             Georeferencing of the block (None if no image was found).
         """
+        if target_size is not None:
+            if tile_size is not None:
+                raise TypeError('Pass tile_size only (target_size is its deprecated name).')
+            warnings.warn('target_size is deprecated, use tile_size instead.',
+                          DeprecationWarning, stacklevel=2)
+            tile_size = target_size
         self.tile_dir = os.path.join(level2_dir, tile)
         self.start_date = start_date
         self.end_date = end_date
@@ -226,7 +236,7 @@ class forcearray():
         self._qai_lut[np.asarray(self.cso_list, dtype=np.int64)] = True
 
         # Output grid and block
-        self.grid_shape, self._row_align, grid_transform, self.crs = self.__resolve_grid(target_size)
+        self.grid_shape, self._row_align, grid_transform, self.crs = self.__resolve_grid(tile_size)
         self._offset, self.shape = self.__resolve_block(topleft_xy, bottomright_xy)
         x0, y0 = self._offset
         self.transform = None if grid_transform is None \
@@ -443,7 +453,7 @@ class forcearray():
             rows -= rows % align  # line blocks up with the GeoTIFF internal blocks
         return rows
 
-    def __resolve_grid(self, target_size):
+    def __resolve_grid(self, tile_size):
         shapes = {}
         block_h = {}
         transforms = {}
@@ -458,9 +468,9 @@ class forcearray():
                 transforms[fam] = src.transform
                 crs = src.crs if crs is None else crs
 
-        if target_size is not None:
-            shape = (int(target_size), int(target_size)) if np.isscalar(target_size) \
-                else tuple(int(x) for x in target_size)
+        if tile_size is not None:
+            shape = (int(tile_size), int(tile_size)) if np.isscalar(tile_size) \
+                else tuple(int(x) for x in tile_size)
         elif not shapes:
             shape = (0, 0)
         elif len(set(shapes.values())) == 1:
@@ -468,7 +478,7 @@ class forcearray():
         else:
             raise ValueError(
                 f'Images have different sizes {shapes} (Landsat and Sentinel-2 mixed). '
-                'Set target_size, e.g. target_size=1000 or target_size=3000.')
+                'Set tile_size, e.g. tile_size=1000 or tile_size=3000.')
 
         # Only align blocks when every image is read at its native size.
         align = None
@@ -491,7 +501,7 @@ class forcearray():
         x0, y0 = (0, 0) if topleft_xy is None else (int(v) for v in topleft_xy)
         x1, y1 = (GW, GH) if bottomright_xy is None else (int(v) for v in bottomright_xy)
         if not self.boa_files and GH == 0 and GW == 0:
-            # No image found and no target_size: nothing to check against.
+            # No image found and no tile_size: nothing to check against.
             return (x0, y0), (max(y1 - y0, 0), max(x1 - x0, 0))
         if not (0 <= x0 < x1 <= GW and 0 <= y0 < y1 <= GH):
             raise ValueError(
