@@ -13,7 +13,9 @@ Performance notes
 * ``get_data_stm`` works on row blocks sized to ``max_memory_mb``. Each
   block holds the int16 stack of every image for those rows, and the
   quantiles come from a multi-threaded numba kernel that uses no temporary
-  copies.
+  copies. It keeps each pixel's series as int16 and sorts short series
+  (up to 128 valid observations, the usual case) with an insertion sort,
+  which is much faster than ``np.sort`` on short arrays.
 * Files are read in parallel by a thread pool (GDAL releases the GIL while
   decoding).
 * Landsat (1000 x 1000) and Sentinel-2 (3000 x 3000) images can be mixed by
@@ -96,13 +98,33 @@ def toRaster(arr_in, base_raster, out_raster, transform=None, crs=None):
 # --------------------------------------------------------------------------- #
 # Numba kernel for per-pixel quantiles
 # --------------------------------------------------------------------------- #
+# Below this many valid observations a pixel's series is sorted with an
+# insertion sort, which beats np.sort's call and allocation overhead on short
+# arrays. Typical FORCE time series (tens of clear observations per pixel)
+# fall below it.
+_INSERTION_SORT_MAX = 128
+
+
+@njit(inline='always')
+def _insertion_sort(a, n):
+    """Sort a[:n] in place."""
+    for i in range(1, n):
+        v = a[i]
+        j = i - 1
+        while j >= 0 and a[j] > v:
+            a[j + 1] = a[j]
+            j -= 1
+        a[j + 1] = v
+
+
 @njit(parallel=True, cache=True)
-def _quantile_kernel(stack, q, nodata, out):
+def _quantile_kernel(stack, q, nodata, fill, out):
     """Per-pixel linear quantiles along axis 0, ignoring ``nodata``.
 
     stack : (T, N) int16, contiguous
     q     : (P,) float64 in [0, 1]
-    out   : (P, N) float32, set to NaN where a pixel has no valid value
+    fill  : value written where a pixel has no valid value
+    out   : (P, N) float32
     Same method as numpy's default 'linear' interpolation.
     """
     T, N = stack.shape
@@ -114,8 +136,9 @@ def _quantile_kernel(stack, q, nodata, out):
         stop = min(start + chunk, N)
         width = stop - start
         # Copy (T, width) into a local buffer so the reads from the
-        # (T, N) array are contiguous.
-        local = np.empty((width, T), dtype=np.float64)
+        # (T, N) array are contiguous. Values stay int16 (exact, and half
+        # the memory traffic of float64).
+        local = np.empty((width, T), dtype=np.int16)
         counts = np.zeros(width, dtype=np.int64)
         for t in range(T):
             row = stack[t]
@@ -128,9 +151,13 @@ def _quantile_kernel(stack, q, nodata, out):
             n = counts[j]
             if n == 0:
                 for k in range(P):
-                    out[k, start + j] = np.nan
+                    out[k, start + j] = fill
                 continue
-            data = np.sort(local[j, :n])
+            if n <= _INSERTION_SORT_MAX:
+                data = local[j]
+                _insertion_sort(data, n)
+            else:
+                data = np.sort(local[j, :n])
             if n == 1:
                 for k in range(P):
                     out[k, start + j] = data[0]
@@ -452,10 +479,10 @@ class forcearray():
 
                     list(ex.map(fill, range(T)))
                     res = np.empty((P, B * h * W), dtype=np.float32)
-                    _quantile_kernel(stack.reshape(T, -1), q, stack_nodata, res)
+                    _quantile_kernel(stack.reshape(T, -1), q, stack_nodata,
+                                     np.float32(nodata), res)
                     del stack
                     res = res.reshape(P, B, h, W)
-                    np.nan_to_num(res, copy=False, nan=nodata)
                     # (P, B, h, W) -> (P, h, W, B)
                     stm[:, r0:r1] = np.moveaxis(res, 1, -1)
                     del res
